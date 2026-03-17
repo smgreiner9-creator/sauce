@@ -5,9 +5,21 @@ use atomic_float::AtomicF32;
 pub mod dsp;
 pub mod editor;
 
+use dsp::yin::PitchDetector;
+use dsp::psola::PsolaShifter;
+use dsp::formant::FormantShifter;
+use dsp::note_snap::{self, ScaleType};
+
 pub struct Sauce {
     params: Arc<SauceParams>,
     sample_rate: f32,
+    pitch_detector: PitchDetector,
+    psola_shifter: PsolaShifter,
+    formant_shifter: FormantShifter,
+    detected_pitch: Arc<AtomicF32>,
+    target_pitch: Arc<AtomicF32>,
+    mono_buffer: Vec<f32>,
+    processed_buffer: Vec<f32>,
 }
 
 #[derive(Enum, Debug, PartialEq, Eq, Clone, Copy)]
@@ -92,6 +104,13 @@ impl Default for Sauce {
         Self {
             params: Arc::new(SauceParams::default()),
             sample_rate: 44100.0,
+            pitch_detector: PitchDetector::new(44100.0),
+            psola_shifter: PsolaShifter::new(44100.0),
+            formant_shifter: FormantShifter::new(44100.0),
+            detected_pitch: Arc::new(AtomicF32::new(0.0)),
+            target_pitch: Arc::new(AtomicF32::new(0.0)),
+            mono_buffer: vec![0.0; 8192],
+            processed_buffer: vec![0.0; 8192],
         }
     }
 }
@@ -193,10 +212,17 @@ impl Plugin for Sauce {
         _context: &mut impl InitContext<Self>,
     ) -> bool {
         self.sample_rate = buffer_config.sample_rate;
+        self.pitch_detector.set_sample_rate(buffer_config.sample_rate);
+        self.psola_shifter.set_sample_rate(buffer_config.sample_rate);
+        self.formant_shifter.set_sample_rate(buffer_config.sample_rate);
         true
     }
 
-    fn reset(&mut self) {}
+    fn reset(&mut self) {
+        self.pitch_detector.reset();
+        self.psola_shifter.reset();
+        self.formant_shifter.reset();
+    }
 
     fn process(
         &mut self,
@@ -204,13 +230,74 @@ impl Plugin for Sauce {
         _aux: &mut AuxiliaryBuffers,
         _context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
-        for channel_samples in buffer.iter_samples() {
+        let num_samples = buffer.samples();
+        let num_channels = buffer.channels();
+
+        let key_root = self.params.key.value().semitone_offset();
+        let scale = match self.params.scale.value() {
+            Scale::Chromatic => ScaleType::Chromatic,
+            Scale::Major => ScaleType::Major,
+            Scale::Minor => ScaleType::Minor,
+        };
+        let formant_shift = self.params.formant_shift.value();
+
+        // Ensure buffers are large enough
+        if self.mono_buffer.len() < num_samples {
+            self.mono_buffer.resize(num_samples, 0.0);
+            self.processed_buffer.resize(num_samples, 0.0);
+        }
+
+        // Extract mono signal with per-sample smoothed input gain
+        for (i, channel_samples) in buffer.iter_samples().enumerate() {
             let input_gain = self.params.input_gain.smoothed.next();
-            let output_gain = self.params.output_gain.smoothed.next();
+            let mut sum = 0.0f32;
             for sample in channel_samples {
-                *sample *= input_gain * output_gain;
+                sum += *sample;
+            }
+            self.mono_buffer[i] = (sum / num_channels as f32) * input_gain;
+        }
+        let mono_len = num_samples;
+
+        // Pitch detection
+        for i in 0..mono_len {
+            self.pitch_detector.push_sample(self.mono_buffer[i]);
+        }
+        let detected_freq = self.pitch_detector.detect();
+
+        // Pitch correction
+        if let Some(freq) = detected_freq {
+            self.detected_pitch.store(freq, std::sync::atomic::Ordering::Relaxed);
+
+            if let Some(target_freq) = note_snap::snap_frequency(freq, key_root, scale) {
+                self.target_pitch.store(target_freq, std::sync::atomic::Ordering::Relaxed);
+
+                let shifted = self.psola_shifter.process(&self.mono_buffer[..mono_len], freq, target_freq);
+                let result = self.formant_shifter.process(&shifted, formant_shift);
+                self.processed_buffer[..mono_len].copy_from_slice(&result);
+            } else {
+                self.processed_buffer[..mono_len].copy_from_slice(&self.mono_buffer[..mono_len]);
+            }
+        } else {
+            self.detected_pitch.store(0.0, std::sync::atomic::Ordering::Relaxed);
+            self.target_pitch.store(0.0, std::sync::atomic::Ordering::Relaxed);
+            self.processed_buffer[..mono_len].copy_from_slice(&self.mono_buffer[..mono_len]);
+        }
+
+        // Dry/wet mix and write back
+        for (i, mut channel_samples) in buffer.iter_samples().enumerate() {
+            let dry_wet = self.params.dry_wet.smoothed.next();
+            let output_gain = self.params.output_gain.smoothed.next();
+
+            let wet = self.processed_buffer[i];
+            let dry = self.mono_buffer[i];
+            let mixed = dry * (1.0 - dry_wet) + wet * dry_wet;
+            let final_sample = mixed * output_gain;
+
+            for sample in channel_samples.iter_mut() {
+                *sample = final_sample;
             }
         }
+
         ProcessStatus::Normal
     }
 }
