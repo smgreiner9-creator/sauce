@@ -1,5 +1,7 @@
-/// YIN pitch detection wrapper using the pitch-detection crate.
-/// Manages an internal ring buffer and provides a simple push/detect interface.
+/// YIN pitch detection with periodic analysis every N/4 samples.
+///
+/// Detection fires automatically every N/4 input samples.
+/// Holds last valid pitch through unvoiced segments.
 
 use pitch_detection::detector::yin::YINDetector;
 use pitch_detection::detector::PitchDetector as PitchDetectorTrait;
@@ -16,6 +18,13 @@ pub struct PitchDetector {
     write_pos: usize,
     filled: bool,
     analysis_buffer: Vec<f64>,
+
+    // Periodic detection
+    samples_since_detection: usize,
+    detection_interval: usize, // N/4
+
+    // Held pitch state
+    current_pitch: Option<f32>,
 }
 
 impl PitchDetector {
@@ -29,24 +38,49 @@ impl PitchDetector {
             write_pos: 0,
             filled: false,
             analysis_buffer: vec![0.0; buf_size],
+            samples_since_detection: 0,
+            detection_interval: buf_size / 4,
+            current_pitch: None,
         }
     }
 
-    pub fn push_sample(&mut self, sample: f32) {
+    /// Push a sample. Returns Some(freq) when detection fires and finds a pitch.
+    /// Returns None most of the time (detection only runs every N/4 samples).
+    /// When detection runs but finds no pitch, current_pitch is held (not cleared).
+    pub fn push_sample(&mut self, sample: f32) -> Option<f32> {
         self.buffer[self.write_pos] = sample;
         self.write_pos += 1;
         if self.write_pos >= self.buf_size {
             self.write_pos = 0;
             self.filled = true;
         }
-    }
 
-    pub fn detect(&mut self) -> Option<f32> {
-        if !self.filled {
-            return None;
+        self.samples_since_detection += 1;
+
+        if self.filled && self.samples_since_detection >= self.detection_interval {
+            self.samples_since_detection = 0;
+            let detected = self.run_detection();
+            if let Some(freq) = detected {
+                self.current_pitch = Some(freq);
+            }
+            // If detection fails, current_pitch stays (hold behavior)
+            return self.current_pitch;
         }
 
-        // Fill analysis buffer from ring buffer without allocating
+        None
+    }
+
+    /// Get the most recently detected pitch.
+    pub fn current_pitch(&self) -> Option<f32> {
+        self.current_pitch
+    }
+
+    /// Get the analysis window size N (for latency calculation).
+    pub fn window_size(&self) -> usize {
+        self.buf_size
+    }
+
+    fn run_detection(&mut self) -> Option<f32> {
         let tail = &self.buffer[self.write_pos..];
         let head = &self.buffer[..self.write_pos];
         for (i, &s) in tail.iter().chain(head.iter()).enumerate() {
@@ -56,8 +90,6 @@ impl PitchDetector {
         let size = self.buf_size;
         let padding = size / 2;
 
-        // YINDetector uses Rc internally (not Send), so it must be created per-call.
-        // The analysis_buffer reuse still eliminates the main per-call allocation.
         let mut detector = YINDetector::new(size, padding);
         let pitch = detector.get_pitch(
             &self.analysis_buffer[..size],
@@ -78,6 +110,8 @@ impl PitchDetector {
         self.buffer.fill(0.0);
         self.write_pos = 0;
         self.filled = false;
+        self.samples_since_detection = 0;
+        self.current_pitch = None;
     }
 
     pub fn set_sample_rate(&mut self, sample_rate: f32) {
@@ -87,7 +121,10 @@ impl PitchDetector {
         self.buf_size = buf_size;
         self.buffer = vec![0.0; buf_size];
         self.analysis_buffer = vec![0.0; buf_size];
+        self.detection_interval = buf_size / 4;
         self.write_pos = 0;
         self.filled = false;
+        self.samples_since_detection = 0;
+        self.current_pitch = None;
     }
 }
