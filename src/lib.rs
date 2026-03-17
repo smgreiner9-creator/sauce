@@ -224,6 +224,14 @@ impl Plugin for Sauce {
         self.formant_shifter.reset();
     }
 
+    fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
+        editor::create(
+            self.params.clone(),
+            self.detected_pitch.clone(),
+            self.target_pitch.clone(),
+        )
+    }
+
     fn process(
         &mut self,
         buffer: &mut Buffer,
