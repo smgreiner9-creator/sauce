@@ -1,0 +1,29 @@
+[package]
+name = "sauce"
+version = "1.0.0"
+edition = "2021"
+license = "MIT"
+description = "T-Pain style auto-tune VST3 plugin"
+
+[workspace]
+members = ["xtask"]
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git" }
+nih_plug_egui = { git = "https://github.com/robbert-vdh/nih-plug.git" }
+atomic_float = "1"
+pitch-detection = "0.3"
+realfft = "3"
+rustfft = "6"
+
+[profile.release]
+lto = "thin"
+strip = "symbols"
+
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false
