@@ -7,7 +7,7 @@ use pitch_detection::detector::PitchDetector as PitchDetectorTrait;
 const MIN_FREQ: f32 = 80.0;
 const MAX_FREQ: f32 = 1000.0;
 const POWER_THRESHOLD: f64 = 5.0;
-const CLARITY_THRESHOLD: f64 = 0.88;
+const CLARITY_THRESHOLD: f64 = 0.70;
 
 pub struct PitchDetector {
     sample_rate: f32,
@@ -15,6 +15,7 @@ pub struct PitchDetector {
     buf_size: usize,
     write_pos: usize,
     filled: bool,
+    analysis_buffer: Vec<f64>,
 }
 
 impl PitchDetector {
@@ -27,6 +28,7 @@ impl PitchDetector {
             buf_size,
             write_pos: 0,
             filled: false,
+            analysis_buffer: vec![0.0; buf_size],
         }
     }
 
@@ -40,29 +42,25 @@ impl PitchDetector {
     }
 
     pub fn detect(&mut self) -> Option<f32> {
-        if !self.filled && self.write_pos < self.buf_size / 2 {
+        if !self.filled {
             return None;
         }
 
-        let analysis: Vec<f64> = if self.filled {
-            self.buffer[self.write_pos..]
-                .iter()
-                .chain(self.buffer[..self.write_pos].iter())
-                .map(|&s| s as f64)
-                .collect()
-        } else {
-            self.buffer[..self.write_pos]
-                .iter()
-                .map(|&s| s as f64)
-                .collect()
-        };
+        // Fill analysis buffer from ring buffer without allocating
+        let tail = &self.buffer[self.write_pos..];
+        let head = &self.buffer[..self.write_pos];
+        for (i, &s) in tail.iter().chain(head.iter()).enumerate() {
+            self.analysis_buffer[i] = s as f64;
+        }
 
-        let size = analysis.len();
+        let size = self.buf_size;
         let padding = size / 2;
 
+        // YINDetector uses Rc internally (not Send), so it must be created per-call.
+        // The analysis_buffer reuse still eliminates the main per-call allocation.
         let mut detector = YINDetector::new(size, padding);
         let pitch = detector.get_pitch(
-            &analysis,
+            &self.analysis_buffer[..size],
             self.sample_rate as usize,
             POWER_THRESHOLD,
             CLARITY_THRESHOLD,
@@ -88,6 +86,7 @@ impl PitchDetector {
         let buf_size = (min_period_samples * 4).next_power_of_two().max(2048);
         self.buf_size = buf_size;
         self.buffer = vec![0.0; buf_size];
+        self.analysis_buffer = vec![0.0; buf_size];
         self.write_pos = 0;
         self.filled = false;
     }

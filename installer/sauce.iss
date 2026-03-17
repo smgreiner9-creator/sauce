@@ -1,6 +1,10 @@
+#ifndef AppVersion
+  #define AppVersion "1.0.0"
+#endif
+
 [Setup]
 AppName=Sauce
-AppVersion=1.0.0
+AppVersion={#AppVersion}
 AppPublisher=Jen
 DefaultDirName={commoncf}\VST3
 OutputDir=Output

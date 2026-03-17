@@ -20,6 +20,8 @@ pub struct Sauce {
     target_pitch: Arc<AtomicF32>,
     mono_buffer: Vec<f32>,
     processed_buffer: Vec<f32>,
+    dry_buffer: Vec<f32>,
+    max_channels: usize,
 }
 
 #[derive(Enum, Debug, PartialEq, Eq, Clone, Copy)]
@@ -109,8 +111,10 @@ impl Default for Sauce {
             formant_shifter: FormantShifter::new(44100.0),
             detected_pitch: Arc::new(AtomicF32::new(0.0)),
             target_pitch: Arc::new(AtomicF32::new(0.0)),
-            mono_buffer: vec![0.0; 8192],
-            processed_buffer: vec![0.0; 8192],
+            mono_buffer: Vec::new(),
+            processed_buffer: Vec::new(),
+            dry_buffer: Vec::new(),
+            max_channels: 2,
         }
     }
 }
@@ -207,7 +211,7 @@ impl Plugin for Sauce {
 
     fn initialize(
         &mut self,
-        _audio_io_layout: &AudioIOLayout,
+        audio_io_layout: &AudioIOLayout,
         buffer_config: &BufferConfig,
         _context: &mut impl InitContext<Self>,
     ) -> bool {
@@ -215,6 +219,16 @@ impl Plugin for Sauce {
         self.pitch_detector.set_sample_rate(buffer_config.sample_rate);
         self.psola_shifter.set_sample_rate(buffer_config.sample_rate);
         self.formant_shifter.set_sample_rate(buffer_config.sample_rate);
+
+        let max_samples = buffer_config.max_buffer_size as usize;
+        let num_channels = audio_io_layout
+            .main_input_channels
+            .map(|c| c.get() as usize)
+            .unwrap_or(2);
+        self.max_channels = num_channels;
+        self.mono_buffer = vec![0.0; max_samples];
+        self.processed_buffer = vec![0.0; max_samples];
+        self.dry_buffer = vec![0.0; max_samples * num_channels];
         true
     }
 
@@ -249,17 +263,12 @@ impl Plugin for Sauce {
         };
         let formant_shift = self.params.formant_shift.value();
 
-        // Ensure buffers are large enough
-        if self.mono_buffer.len() < num_samples {
-            self.mono_buffer.resize(num_samples, 0.0);
-            self.processed_buffer.resize(num_samples, 0.0);
-        }
-
-        // Extract mono signal with per-sample smoothed input gain
+        // Save original per-channel samples and extract mono signal
         for (i, channel_samples) in buffer.iter_samples().enumerate() {
             let input_gain = self.params.input_gain.smoothed.next();
             let mut sum = 0.0f32;
-            for sample in channel_samples {
+            for (ch, sample) in channel_samples.into_iter().enumerate() {
+                self.dry_buffer[i * num_channels + ch] = *sample;
                 sum += *sample;
             }
             self.mono_buffer[i] = (sum / num_channels as f32) * input_gain;
@@ -291,18 +300,16 @@ impl Plugin for Sauce {
             self.processed_buffer[..mono_len].copy_from_slice(&self.mono_buffer[..mono_len]);
         }
 
-        // Dry/wet mix and write back
+        // Dry/wet mix and write back, preserving stereo image for dry path
         for (i, mut channel_samples) in buffer.iter_samples().enumerate() {
             let dry_wet = self.params.dry_wet.smoothed.next();
             let output_gain = self.params.output_gain.smoothed.next();
 
             let wet = self.processed_buffer[i];
-            let dry = self.mono_buffer[i];
-            let mixed = dry * (1.0 - dry_wet) + wet * dry_wet;
-            let final_sample = mixed * output_gain;
-
-            for sample in channel_samples.iter_mut() {
-                *sample = final_sample;
+            for (ch, sample) in channel_samples.iter_mut().enumerate() {
+                let dry = self.dry_buffer[i * num_channels + ch];
+                let mixed = dry * (1.0 - dry_wet) + wet * dry_wet;
+                *sample = mixed * output_gain;
             }
         }
 

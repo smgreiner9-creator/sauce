@@ -10,7 +10,7 @@ fn generate_sine(freq: f32, sample_rate: f32, num_samples: usize) -> Vec<f32> {
 fn test_zero_shift_is_passthrough() {
     let sr = 44100.0;
     let input = generate_sine(440.0, sr, 2048);
-    let shifter = FormantShifter::new(sr);
+    let mut shifter = FormantShifter::new(sr);
     let output = shifter.process(&input, 0.0);
     let rms_diff: f32 = input
         .iter()
@@ -29,7 +29,7 @@ fn test_zero_shift_is_passthrough() {
 fn test_nonzero_shift_changes_signal() {
     let sr = 44100.0;
     let input = generate_sine(440.0, sr, 2048);
-    let shifter = FormantShifter::new(sr);
+    let mut shifter = FormantShifter::new(sr);
     let output = shifter.process(&input, 6.0);
     let rms_diff: f32 = input
         .iter()
@@ -47,7 +47,7 @@ fn test_nonzero_shift_changes_signal() {
 fn test_output_length_matches() {
     let sr = 44100.0;
     let input = generate_sine(440.0, sr, 2048);
-    let shifter = FormantShifter::new(sr);
+    let mut shifter = FormantShifter::new(sr);
     let output = shifter.process(&input, 3.0);
     assert_eq!(output.len(), input.len());
 }

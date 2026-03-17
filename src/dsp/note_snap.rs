@@ -12,6 +12,9 @@ const MAJOR: &[u8] = &[0, 2, 4, 5, 7, 9, 11];
 const MINOR: &[u8] = &[0, 2, 3, 5, 7, 8, 10];
 
 pub fn freq_to_midi(freq: f32) -> f32 {
+    if freq <= 0.0 {
+        return f32::NAN;
+    }
     69.0 + 12.0 * (freq / 440.0).log2()
 }
 
