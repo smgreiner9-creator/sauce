@@ -8,7 +8,6 @@ use rustfft::{Fft, FftPlanner};
 use std::sync::Arc;
 
 pub struct FormantShifter {
-    sample_rate: f32,
     fft_size: usize,
     hop_size: usize,
     lifter_order: usize,
@@ -30,7 +29,6 @@ pub struct FormantShifter {
     // Pre-allocated OLA accumulators (avoid per-call allocation)
     ola_output: Vec<f32>,
     ola_window_sum: Vec<f32>,
-    padded_buf: Vec<f32>,
 }
 
 impl FormantShifter {
@@ -54,7 +52,6 @@ impl FormantShifter {
         let spec_len = fft_size / 2 + 1;
 
         Self {
-            sample_rate,
             fft_size,
             hop_size,
             lifter_order,
@@ -73,7 +70,6 @@ impl FormantShifter {
             cepstrum: vec![Complex::new(0.0, 0.0); fft_size],
             ola_output: Vec::new(),
             ola_window_sum: Vec::new(),
-            padded_buf: Vec::new(),
         }
     }
 
@@ -150,16 +146,6 @@ impl FormantShifter {
         for i in 0..len {
             output[i] = self.frame_output[i] as f32;
         }
-    }
-
-    /// Process a single frame (already fft_size length) from f32 input.
-    fn process_frame_from_f32(&mut self, input: &[f32], shift_ratio: f64) {
-        let fft_size = self.fft_size;
-        for i in 0..fft_size {
-            let w = hann_window(i, fft_size);
-            self.windowed[i] = input[i] as f64 * w;
-        }
-        self.process_frame_inner(shift_ratio);
     }
 
     /// Process a single frame (already fft_size length) from f32 slice.
