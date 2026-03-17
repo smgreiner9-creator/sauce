@@ -288,16 +288,29 @@ impl Plugin for Sauce {
             if let Some(target_freq) = note_snap::snap_frequency(freq, key_root, scale) {
                 self.target_pitch.store(target_freq, std::sync::atomic::Ordering::Relaxed);
 
-                let shifted = self.psola_shifter.process(&self.mono_buffer[..mono_len], freq, target_freq);
-                let result = self.formant_shifter.process(&shifted, formant_shift);
-                self.processed_buffer[..mono_len].copy_from_slice(&result);
+                // PSOLA writes into processed_buffer, formant reads from there
+                self.psola_shifter.process_into(
+                    &self.mono_buffer[..mono_len], freq, target_freq,
+                    &mut self.processed_buffer[..mono_len],
+                );
+                // Formant shift: use mono_buffer as scratch to avoid allocation
+                if formant_shift.abs() >= 0.01 {
+                    // Copy PSOLA output to mono_buffer (scratch), then formant writes back to processed_buffer
+                    self.mono_buffer[..mono_len].copy_from_slice(&self.processed_buffer[..mono_len]);
+                    self.formant_shifter.process_into(
+                        &self.mono_buffer[..mono_len], formant_shift,
+                        &mut self.processed_buffer[..mono_len],
+                    );
+                }
             } else {
                 self.processed_buffer[..mono_len].copy_from_slice(&self.mono_buffer[..mono_len]);
+                self.psola_shifter.reset();
             }
         } else {
             self.detected_pitch.store(0.0, std::sync::atomic::Ordering::Relaxed);
             self.target_pitch.store(0.0, std::sync::atomic::Ordering::Relaxed);
             self.processed_buffer[..mono_len].copy_from_slice(&self.mono_buffer[..mono_len]);
+            self.psola_shifter.reset();
         }
 
         // Dry/wet mix and write back, preserving stereo image for dry path

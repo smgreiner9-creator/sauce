@@ -27,6 +27,10 @@ pub struct FormantShifter {
     new_spectrum: Vec<Complex<f64>>,
     frame_output: Vec<f64>,
     cepstrum: Vec<Complex<f64>>,
+    // Pre-allocated OLA accumulators (avoid per-call allocation)
+    ola_output: Vec<f32>,
+    ola_window_sum: Vec<f32>,
+    padded_buf: Vec<f32>,
 }
 
 impl FormantShifter {
@@ -67,6 +71,9 @@ impl FormantShifter {
             new_spectrum: vec![Complex::new(0.0, 0.0); spec_len],
             frame_output: vec![0.0; fft_size],
             cepstrum: vec![Complex::new(0.0, 0.0); fft_size],
+            ola_output: Vec::new(),
+            ola_window_sum: Vec::new(),
+            padded_buf: Vec::new(),
         }
     }
 
@@ -74,29 +81,34 @@ impl FormantShifter {
         *self = Self::build(sample_rate, self.fft_size);
     }
 
-    pub fn process(&mut self, input: &[f32], shift_semitones: f32) -> Vec<f32> {
-        if shift_semitones.abs() < 0.01 {
-            return input.to_vec();
-        }
-
+    /// Process formant shifting, writing result into `output`.
+    /// `output` must be at least `input.len()` long.
+    /// If shift_semitones is ~0, copies input to output (bypass).
+    pub fn process_into(&mut self, input: &[f32], shift_semitones: f32, output: &mut [f32]) {
         let len = input.len();
-        if len == 0 {
-            return vec![];
+        if shift_semitones.abs() < 0.01 || len == 0 {
+            output[..len].copy_from_slice(input);
+            return;
         }
 
         let fft_size = self.fft_size;
         let hop_size = self.hop_size;
         let shift_ratio = 2.0f64.powf(shift_semitones as f64 / 12.0);
 
-        // For small blocks (< fft_size): zero-pad to fft_size and process as single frame
+        // For small blocks (< fft_size): zero-pad and process as single frame
         if len < fft_size {
-            return self.process_padded(input, shift_ratio);
+            self.process_padded_into(input, shift_ratio, output);
+            return;
         }
 
         // Standard OLA processing for blocks >= fft_size
         let num_frames = (len - fft_size) / hop_size + 1;
-        let mut output = vec![0.0f32; len];
-        let mut window_sum = vec![0.0f32; len];
+
+        // Use output_buf and window_sum_buf as OLA accumulators
+        self.ola_output.resize(len, 0.0);
+        self.ola_output[..len].fill(0.0);
+        self.ola_window_sum.resize(len, 0.0);
+        self.ola_window_sum[..len].fill(0.0);
 
         for frame_idx in 0..num_frames {
             let start = frame_idx * hop_size;
@@ -109,39 +121,35 @@ impl FormantShifter {
 
             for i in 0..fft_size {
                 let w = hann_window(i, fft_size);
-                output[start + i] += (self.frame_output[i] * w) as f32;
-                window_sum[start + i] += w as f32;
+                self.ola_output[start + i] += (self.frame_output[i] * w) as f32;
+                self.ola_window_sum[start + i] += w as f32;
             }
         }
 
         for i in 0..len {
-            if window_sum[i] > 1e-6 {
-                output[i] /= window_sum[i];
+            if self.ola_window_sum[i] > 1e-6 {
+                output[i] = self.ola_output[i] / self.ola_window_sum[i];
             } else {
                 output[i] = input[i];
             }
         }
-
-        output
     }
 
-    /// Process a block smaller than fft_size by zero-padding to fft_size.
-    fn process_padded(&mut self, input: &[f32], shift_ratio: f64) -> Vec<f32> {
+    /// Process a block smaller than fft_size by zero-padding.
+    fn process_padded_into(&mut self, input: &[f32], shift_ratio: f64, output: &mut [f32]) {
         let len = input.len();
         let fft_size = self.fft_size;
 
-        // Build a zero-padded frame
-        let mut padded = vec![0.0f32; fft_size];
-        padded[..len].copy_from_slice(input);
+        // Window and zero-pad directly into self.windowed
+        for i in 0..fft_size {
+            let sample = if i < len { input[i] as f64 } else { 0.0 };
+            self.windowed[i] = sample * hann_window(i, fft_size);
+        }
+        self.process_frame_inner(shift_ratio);
 
-        self.process_frame_from_f32(&padded, shift_ratio);
-
-        // Extract just the original-length portion
-        let mut output = vec![0.0f32; len];
         for i in 0..len {
             output[i] = self.frame_output[i] as f32;
         }
-        output
     }
 
     /// Process a single frame (already fft_size length) from f32 input.

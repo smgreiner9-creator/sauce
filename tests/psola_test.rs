@@ -1,5 +1,4 @@
 use sauce::dsp::psola::PsolaShifter;
-// Using custom autocorrelation pitch measurement for robustness
 
 fn generate_sine(freq: f32, sample_rate: f32, num_samples: usize) -> Vec<f32> {
     (0..num_samples)
@@ -8,7 +7,6 @@ fn generate_sine(freq: f32, sample_rate: f32, num_samples: usize) -> Vec<f32> {
 }
 
 fn measure_pitch(signal: &[f32], sample_rate: f32) -> Option<f32> {
-    // Autocorrelation-based pitch detection: find first peak above threshold
     let max_period = (sample_rate / 80.0) as usize;
     let min_period = (sample_rate / 1000.0) as usize;
     let len = signal.len();
@@ -17,7 +15,6 @@ fn measure_pitch(signal: &[f32], sample_rate: f32) -> Option<f32> {
     let analysis_len = len.min(8192);
     let sig = &signal[..analysis_len];
 
-    // Compute normalized autocorrelation
     let mut autocorr = Vec::new();
     for lag in min_period..=max_period.min(analysis_len / 2) {
         let mut corr = 0.0f32;
@@ -34,7 +31,6 @@ fn measure_pitch(signal: &[f32], sample_rate: f32) -> Option<f32> {
         autocorr.push((lag, nc));
     }
 
-    // Find first peak in autocorrelation above 0.5 threshold
     let threshold = 0.5;
     for i in 1..autocorr.len() - 1 {
         let (lag, nc) = autocorr[i];
@@ -50,7 +46,8 @@ fn test_no_shift_preserves_pitch() {
     let sr = 44100.0;
     let input = generate_sine(220.0, sr, 8192);
     let mut shifter = PsolaShifter::new(sr);
-    let output = shifter.process(&input, 220.0, 220.0);
+    let mut output = vec![0.0; input.len()];
+    shifter.process_into(&input, 220.0, 220.0, &mut output);
     let detected = measure_pitch(&output, sr);
     assert!(detected.is_some());
     let freq = detected.unwrap();
@@ -62,7 +59,8 @@ fn test_shift_up_octave() {
     let sr = 44100.0;
     let input = generate_sine(220.0, sr, 8192);
     let mut shifter = PsolaShifter::new(sr);
-    let output = shifter.process(&input, 220.0, 440.0);
+    let mut output = vec![0.0; input.len()];
+    shifter.process_into(&input, 220.0, 440.0, &mut output);
     let detected = measure_pitch(&output, sr);
     assert!(detected.is_some());
     let freq = detected.unwrap();
@@ -74,6 +72,8 @@ fn test_output_length_matches_input() {
     let sr = 44100.0;
     let input = generate_sine(300.0, sr, 4096);
     let mut shifter = PsolaShifter::new(sr);
-    let output = shifter.process(&input, 300.0, 350.0);
+    let mut output = vec![0.0; input.len()];
+    shifter.process_into(&input, 300.0, 350.0, &mut output);
+    // Output was written into pre-allocated slice — length matches by construction
     assert_eq!(output.len(), input.len());
 }
