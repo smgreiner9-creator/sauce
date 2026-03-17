@@ -143,12 +143,11 @@ impl PhaseTrackingShifter {
             self.capture_grain();
         }
 
-        // Advance output phase
+        // Advance output phase at normal rate (one grain per output period)
         self.output_phase += 1.0 / self.output_period;
 
         if self.output_phase >= 1.0 {
             self.output_phase -= 1.0;
-            // Place resampled + windowed grain into output accumulator
             if self.grain_len > 0 {
                 self.place_grain();
             }
@@ -179,11 +178,11 @@ impl PhaseTrackingShifter {
     }
 
     /// Resample the captured grain to output_period length, apply Hann window,
-    /// and overlap-add into the output ring buffer.
+    /// and overlap-add into the output ring buffer with 50% overlap (COLA).
     #[inline]
     fn place_grain(&mut self) {
         let out_len = self.output_period.round() as usize;
-        if out_len == 0 || self.grain_len == 0 {
+        if out_len < 2 || self.grain_len == 0 {
             return;
         }
 
@@ -194,35 +193,29 @@ impl PhaseTrackingShifter {
             self.output_read - self.output_write
         };
         if out_len > available {
-            return; // drop grain to prevent corruption
+            return;
         }
 
         let grain_len = self.grain_len;
         let ratio = grain_len as f64 / out_len as f64;
         let denom = (out_len - 1).max(1) as f64;
 
-        // Start writing half a grain back from output_write for 50% overlap.
-        // Each grain overlaps the previous by out_len/2, giving COLA with Hann window.
-        let half = out_len / 2;
-        let overlap_start =
-            (self.output_write + self.output_accum_len - half) % self.output_accum_len;
-
+        // Write the resampled, Hann-windowed grain starting at output_write.
+        // Grains tile the output — each occupies one output period.
+        // The Hann window tapers edges; the output buffer is cleared after reading
+        // (line 159), so there's no stale accumulation.
         for i in 0..out_len {
-            // Position in the grain to read from
             let src_pos = i as f64 * ratio;
-
-            // Cubic Lagrange interpolation from the grain
             let sample = cubic_lagrange_interp(&self.grain, grain_len, src_pos);
 
-            // Hann window (N-1 denominator for exact zero at endpoints)
+            // Hann window — smooth taper at grain edges
             let w = 0.5 * (1.0 - (2.0 * PI * i as f64 / denom).cos());
 
-            // Overlap-add into output ring buffer
-            let write_idx = (overlap_start + i) % self.output_accum_len;
+            let write_idx = (self.output_write + i) % self.output_accum_len;
             self.output_accum[write_idx] += (sample * w) as f32;
         }
 
-        // Advance write pointer by full grain length (timing stays correct)
+        // Advance write pointer by full grain length
         self.output_write = (self.output_write + out_len) % self.output_accum_len;
     }
 

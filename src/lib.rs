@@ -115,7 +115,7 @@ impl Default for SauceParams {
 
             key: EnumParam::new("Key", MusicalKey::C),
 
-            scale: EnumParam::new("Scale", Scale::Chromatic),
+            scale: EnumParam::new("Scale", Scale::Major),
 
             formant_shift: FloatParam::new(
                 "Formant Shift",
@@ -259,8 +259,8 @@ impl Plugin for Sauce {
             if let Some(detected_freq) = self.pitch_detector.push_sample(mono) {
                 self.detected_pitch.store(detected_freq, std::sync::atomic::Ordering::Relaxed);
 
-                if let Some(target_freq) = note_snap::correct_pitch(
-                    detected_freq, key_root, scale, 1.0,
+                if let Some(target_freq) = note_snap::snap_frequency(
+                    detected_freq, key_root, scale,
                 ) {
                     self.target_pitch.store(target_freq, std::sync::atomic::Ordering::Relaxed);
                     self.shifter.set_pitch(detected_freq, target_freq);
