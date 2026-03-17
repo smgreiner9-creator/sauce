@@ -19,12 +19,21 @@ pub struct PitchDetector {
     filled: bool,
     analysis_buffer: Vec<f64>,
 
+    // NOTE: YINDetector cannot be cached in the struct because
+    // pitch-detection's YINDetector uses Rc<RefCell<..>> internally,
+    // making it !Send. nih-plug requires Plugin: Send, so we must
+    // construct the detector per-call. The analysis_buffer reuse
+    // already eliminates the largest allocation.
+
     // Periodic detection
     samples_since_detection: usize,
     detection_interval: usize, // N/4
 
     // Held pitch state
     current_pitch: Option<f32>,
+
+    // Unvoiced timeout: clear pitch after N consecutive failed detections
+    consecutive_failures: usize,
 }
 
 impl PitchDetector {
@@ -41,6 +50,7 @@ impl PitchDetector {
             samples_since_detection: 0,
             detection_interval: buf_size / 4,
             current_pitch: None,
+            consecutive_failures: 0,
         }
     }
 
@@ -62,8 +72,14 @@ impl PitchDetector {
             let detected = self.run_detection();
             if let Some(freq) = detected {
                 self.current_pitch = Some(freq);
+                self.consecutive_failures = 0;
+            } else {
+                self.consecutive_failures += 1;
+                // After 5 consecutive failures, clear pitch to stop shifting silence/breath
+                if self.consecutive_failures >= 5 {
+                    self.current_pitch = None;
+                }
             }
-            // If detection fails, current_pitch stays (hold behavior)
             return self.current_pitch;
         }
 
@@ -90,6 +106,7 @@ impl PitchDetector {
         let size = self.buf_size;
         let padding = size / 2;
 
+        // Per-call construction required: YINDetector uses Rc internally (!Send)
         let mut detector = YINDetector::new(size, padding);
         let pitch = detector.get_pitch(
             &self.analysis_buffer[..size],
@@ -112,6 +129,7 @@ impl PitchDetector {
         self.filled = false;
         self.samples_since_detection = 0;
         self.current_pitch = None;
+        self.consecutive_failures = 0;
     }
 
     pub fn set_sample_rate(&mut self, sample_rate: f32) {
@@ -126,5 +144,6 @@ impl PitchDetector {
         self.filled = false;
         self.samples_since_detection = 0;
         self.current_pitch = None;
+        self.consecutive_failures = 0;
     }
 }

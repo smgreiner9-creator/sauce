@@ -70,6 +70,7 @@ impl PhaseTrackingShifter {
     pub fn new(sample_rate: f32) -> Self {
         let cbuf_len = compute_buf_size(sample_rate);
         let latency = cbuf_len / 2;
+        let output_accum_len = cbuf_len * 2; // 2x for 50% overlap headroom
 
         Self {
             sample_rate,
@@ -82,8 +83,8 @@ impl PhaseTrackingShifter {
             output_period: 0.0,
             grain: vec![0.0; cbuf_len / 2],
             grain_len: 0,
-            output_accum: vec![0.0; cbuf_len],
-            output_accum_len: cbuf_len,
+            output_accum: vec![0.0; output_accum_len],
+            output_accum_len,
             output_read: 0,
             output_write: latency, // start write ahead by latency
             latency,
@@ -105,6 +106,10 @@ impl PhaseTrackingShifter {
     /// pitch periods are held — this allows smooth output through unvoiced frames.
     pub fn set_pitch(&mut self, detected_freq: f32, target_freq: f32) {
         if detected_freq > 0.0 && target_freq > 0.0 {
+            // Re-anchor output_write on first valid pitch so pointers are aligned
+            if !self.pitch_valid {
+                self.output_write = (self.output_read + self.latency) % self.output_accum_len;
+            }
             self.input_period = self.sample_rate as f64 / detected_freq as f64;
             self.output_period = self.sample_rate as f64 / target_freq as f64;
             self.pitch_valid = true;
@@ -121,13 +126,12 @@ impl PhaseTrackingShifter {
         self.cbuf[self.cbuf_write] = input;
         self.cbuf_write = (self.cbuf_write + 1) % self.cbuf_len;
 
-        // Before first valid pitch, output silence
+        // Before first valid pitch, output silence but keep read pointer moving
         if !self.pitch_valid || self.input_period < 1.0 || self.output_period < 1.0 {
-            // Still advance output read pointer to stay in sync
-            let out = self.output_accum[self.output_read];
+            // Advance output read pointer but DON'T advance input/output phases
             self.output_accum[self.output_read] = 0.0;
             self.output_read = (self.output_read + 1) % self.output_accum_len;
-            return out;
+            return 0.0;
         }
 
         // Advance input phase
@@ -183,8 +187,25 @@ impl PhaseTrackingShifter {
             return;
         }
 
+        // Overwrite guard: drop grain if it would lap the read pointer
+        let available = if self.output_write >= self.output_read {
+            self.output_accum_len - (self.output_write - self.output_read)
+        } else {
+            self.output_read - self.output_write
+        };
+        if out_len > available {
+            return; // drop grain to prevent corruption
+        }
+
         let grain_len = self.grain_len;
         let ratio = grain_len as f64 / out_len as f64;
+        let denom = (out_len - 1).max(1) as f64;
+
+        // Start writing half a grain back from output_write for 50% overlap.
+        // Each grain overlaps the previous by out_len/2, giving COLA with Hann window.
+        let half = out_len / 2;
+        let overlap_start =
+            (self.output_write + self.output_accum_len - half) % self.output_accum_len;
 
         for i in 0..out_len {
             // Position in the grain to read from
@@ -193,15 +214,15 @@ impl PhaseTrackingShifter {
             // Cubic Lagrange interpolation from the grain
             let sample = cubic_lagrange_interp(&self.grain, grain_len, src_pos);
 
-            // Hann window
-            let w = 0.5 * (1.0 - (2.0 * PI * i as f64 / out_len as f64).cos());
+            // Hann window (N-1 denominator for exact zero at endpoints)
+            let w = 0.5 * (1.0 - (2.0 * PI * i as f64 / denom).cos());
 
             // Overlap-add into output ring buffer
-            let write_idx = (self.output_write + i) % self.output_accum_len;
+            let write_idx = (overlap_start + i) % self.output_accum_len;
             self.output_accum[write_idx] += (sample * w) as f32;
         }
 
-        // Advance write pointer by output period
+        // Advance write pointer by full grain length (timing stays correct)
         self.output_write = (self.output_write + out_len) % self.output_accum_len;
     }
 
@@ -236,7 +257,7 @@ mod tests {
         let s = PhaseTrackingShifter::new(44100.0);
         assert_eq!(s.cbuf_len, 4096);
         assert_eq!(s.latency, 2048);
-        assert_eq!(s.output_accum_len, 4096);
+        assert_eq!(s.output_accum_len, 8192);
     }
 
     #[test]
